@@ -7,49 +7,98 @@ import RemoteData
 import Task exposing (Task)
 
 
-port inbox : (String -> msg) -> Sub msg
+port unobservablePort : (String -> msg) -> Sub msg
 
 
-port done : () -> Cmd msg
-
-
-type alias Model =
-    Maybe { field : String }
+port msgPort : (String -> msg) -> Sub msg
 
 
 type Msg
-    = Message String
+    = Observable String
+    | Unobservable String
+
+
+type Custom
+    = Cons { field : String }
+
+
+type alias Model =
+    { string : String, custom : Custom }
 
 
 main : Program () Model Msg
 main =
     Browser.element
-        { init = init
+        { init =
+            always
+                ( { custom = Cons { field = "" }, string = "" }
+                , Cmd.none
+                )
         , view = view
         , update = update
-        , subscriptions = always (inbox Message)
+        , subscriptions =
+            always <|
+                Sub.batch
+                    [ msgPort Observable
+                    , unobservablePort Unobservable
+                    ]
         }
 
 
-init : () -> ( Model, Cmd Msg )
-init _ =
-    ( Just { field = "init" }, Cmd.none )
+view : Model -> Html Msg
+view model =
+    Html.div
+        []
+        [ Html.text model.string
+        , Html.Lazy.lazy viewCustom model.custom
+        ]
+
+
+viewCustom : Custom -> Html Msg
+viewCustom (Cons record) =
+    let
+        nothing =
+            Debug.log "calling viewCustom on" record
+    in
+    Html.text record.field
 
 
 update : Msg -> Model -> ( Model, Cmd Msg )
-update (Message msg) model =
+update msg model =
     let
         nothing =
-            Debug.log "Message" msg
+            Debug.log "updating with" msg
     in
-    ( model |> Maybe.map (\r -> { r | field = msg })
-    , done ()
+    ( { model
+        | custom = updateCustom msg model.custom
+        , string = updateString msg model.string
+      }
+    , Cmd.none
     )
 
 
-view : Model -> Html Msg
-view =
-    Maybe.map .field
-        >> Maybe.withDefault ""
-        >> Debug.log "view"
-        >> Html.text
+updateCustom : Msg -> Custom -> Custom
+updateCustom msg (Cons record) =
+    -- here is the problem, since record update syntax always(?) breaks
+    -- reference-equality
+    Cons { record | field = updateOnObservable msg record.field }
+
+
+updateOnObservable : Msg -> String -> String
+updateOnObservable msg string =
+    case msg of
+        Observable field ->
+            field
+
+        Unobservable _ ->
+            string
+
+
+updateString : Msg -> String -> String
+updateString msg string =
+    case msg of
+        Observable _ ->
+            string
+
+        Unobservable field ->
+            field

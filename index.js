@@ -8,25 +8,26 @@ async function main() {
   });
   var page = await browser.newPage();
   page.on('console', msg => {
-    var text = msg.text();
-    console.log(text);
-    if (text.includes("end")) {
-      process.exit(0);
-    }
+    console.log(msg.text());
   });
   await page.goto(`file://${process.argv[2]}`);
-  await page.evaluate(() => {
-    var app = Elm.Main.init({ node: document.body });
-  });
-  await page.evaluate(() => {
-    app.ports.inbox.send("foo");
-  });
-  await page.evaluate(() => {
-    app.ports.inbox.send("bar");
-  });
-  await page.evaluate(() => {
-    app.ports.inbox.send("end");
-  });
+  var send = async msg => {
+    await page.evaluate(
+      `app.ports.unobservablePort.send("${msg}")`
+    );
+    await page.waitForFunction(
+      `document.querySelector("body").innerText.includes("${msg}")`
+    );
+    await page.evaluate(
+      `app.ports.msgPort.send("observable-${msg}")`
+    );
+    await page.waitForFunction(
+      `document.querySelector("body").innerText.includes("observable-${msg}")`
+    );
+  }
+  await send("foo");
+  await send("bar");
+  process.exit(0);
 }
 
 main();
