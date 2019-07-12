@@ -124,12 +124,12 @@ But it was *still* slow.
 
 We started to conduct an investigation of this whole 'reference equality' thing
 in the abstract. Reading the docs we can see that `lazyN` definitely treats
-primitive values as equal, so we just need to investigate how it handles records
-and custom types.
+primitive values (strings, characters, booleans and numbers) as equal, so we
+just need to investigate how it handles records and custom types.
 
-To test, we used this Javascript project. We create a basic Elm app with a
-single input port. Then we build it and drive the test with the puppeteer
-script at `index.js`.
+To test, we used [this](https://github.com/pivotal-jamie-klassen/lazy.git)
+Javascript project. We create a basic Elm app with a single input port. Then we
+build it and drive the test with the puppeteer script at `index.js`.
 
 If you run it yourself, you can reproduce the findings. The key part is that
 record-update syntax always produces a value that is not equal by reference.
@@ -145,4 +145,98 @@ is different, by reference, from
 { record | field = "" }
 ```
 
-even though they are equal by value, and look pretty much the same!
+even though they are equal by value, and look pretty much the same! Furthermore,
+if a record like that were to be deeply nested in a structure of records and
+custom types, _changing that deeply-nested field would change the
+value-by-reference of all of that record's ancestors_. You can see this
+demonstrated in our experiment, which gives the following output:
+
+```
+init: ""
+Custom.view: { field = "" }
+Custom: "deeply nested"
+Custom.view: { field = "deeply nested" }
+Canary: "canary"
+Custom.view: { field = "deeply nested" }
+```
+
+So what's really going on here? The model consists of two pieces of data, called
+'custom' and 'canary'. The test script sends a message into Elm that causes the
+deeply-nested record field to change, and therefore the the lazy view needs to
+actually be evaluated. But the second 'canary' message should only change the
+outer `Html.text model.canaryString` part below, and the `Html.Lazy.lazy` call
+should notice that it's being called with identical arguments, but based on the
+log output above we can see that `Cusom.view` is getting called again with the
+same value!
+
+```
+view : Model -> Html Msg
+view model =
+    Html.div
+        []
+        [ Html.text model.canaryString
+        , Html.Lazy.lazy Custom.view model.custom
+        ]
+```
+
+the culprit in this behaviour is the above-mentioned reference-equality-breaking
+behaviour in `DeeplyNestedRecord.elm`:
+
+```
+update : Msg -> DeeplyNestedRecord -> DeeplyNestedRecord
+update msg deeplyNestedRecord =
+    { deeplyNestedRecord
+        | field =
+            case msg of
+                Canary _ ->
+                    deeplyNestedRecord.field
+
+                Custom newField ->
+                    newField
+    }
+```
+
+In the Concourse code base, it turns out that when you are viewing the build
+page and you hover anything anywhere in the app, there is a deeply-nested record
+that will always be modified with that same pesky record-update syntax (excerpt
+from `web/elm/src/Build/Build.elm`:
+
+```
+update : { a | hovered : HoverState.HoverState } -> Message -> ET Model
+update session msg ( model, effects ) =
+    case msg of
+        Hover _ ->
+            let
+                newModel =
+                    { model | hoveredCounter = 0 }
+            in
+            updateOutput
+                (Build.Output.Output.handleStepTreeMsg <| StepTree.updateTooltip session newModel)
+                ( newModel, effects )
+```
+
+So if we can avoid having reference equality break here, we can fix all our
+(surprisingly-widespread) expensive DOM-diffing woes.
+
+In general, the Elm language authors preferred to have an eagerly-evaluated
+language to make it easier to reason about the runtime characteristics of a
+system. To understand this, note that performance problems in Haskell are
+notoriously difficult to diagnose in the rare cases when they occur because
+Haskell is lazily-evaluated.
+
+So when the Elm authors added an option for lazy evaluation, they knew it was
+only for performance-intensive use cases and they wisely observed that in those
+cases you will want an equality check that is even cheaper than virtual DOM
+diffing, so they went even cheaper than the value equality that is the only
+kind of 'real' equality in a pure functional language. They went for reference
+equality, but this then means that a lot of other abstractions in your system 
+become very leaky. This 'pass-by-reference' behaviour of records and custom
+types is encapsulated 99% of the time when working on Elm, and it is really
+hard to write any meaningful assertions about it (certainly not assertions that
+can be written in Elm itself, since the runtime has no means of talking about
+side effects by design).
+
+The real kicker is that record-update syntax breaks reference equality by
+default. I might hope that in future versions of Elm this stops happening, so
+that we can trust our tests and types to give us (pretty much) the whole story
+about how our program will behave at runtime.
